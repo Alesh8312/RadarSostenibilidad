@@ -1,0 +1,20 @@
+name: Etiquetar reportes del Radar
+
+on:
+  issues:
+    types: [opened, reopened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  etiquetar:
+    if: startsWith(github.event.issue.title, '[RADAR]') || contains(github.event.issue.body, 'radar-sostenibilidad v1')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Agregar la etiqueta radar-sostenibilidad
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMERO: ${{ github.event.issue.number }}
+          REPOSITORIO: ${{ github.repository }}
+        run: gh issue edit "$NUMERO" --repo "$REPOSITORIO" --add-label "radar-sostenibilidad"
