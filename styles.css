@@ -197,6 +197,7 @@ code {
   border-radius: var(--radius-sm);
 }
 .header-link:hover { background: rgba(255, 255, 255, 0.1); }
+.header-button { background: transparent; font-family: inherit; cursor: pointer; }
 
 /* ==========================================================================
    4. NAVEGACIÓN
@@ -574,7 +575,7 @@ select.input {
 .combobox-option[aria-selected="true"] .opt-name { font-weight: 600; }
 .combobox-empty { padding: 10px; color: var(--color-muted); font-size: 0.88rem; }
 
-.form-actions { display: flex; justify-content: center; margin-top: 22px; }
+.form-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 22px; }
 .form-note { text-align: center; font-size: 0.83rem; color: var(--color-muted); margin-top: 12px; }
 
 /* Panel de confirmación */
@@ -841,6 +842,10 @@ th[aria-sort="descending"] .th-sort::after { content: "↓"; opacity: 1; }
   color: var(--color-text);
 }
 .dialog::backdrop { background: rgba(16, 30, 45, 0.45); }
+/* Encabezado y botones fijos; solo el contenido se desplaza */
+.dialog[open],
+.dialog[open] > form { display: flex; flex-direction: column; min-height: 0; }
+.dialog[open] > form { flex: 1 1 auto; }
 .dialog-head {
   display: flex;
   align-items: center;
@@ -857,7 +862,7 @@ th[aria-sort="descending"] .th-sort::after { content: "↓"; opacity: 1; }
   cursor: pointer;
   color: var(--color-muted);
 }
-.dialog-body { padding: 18px 20px; overflow-y: auto; }
+.dialog-body { padding: 18px 20px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .dialog-body > * + * { margin-top: 12px; }
 .dialog-actions {
   display: flex;
@@ -873,6 +878,36 @@ th[aria-sort="descending"] .th-sort::after { content: "↓"; opacity: 1; }
 .detail-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; }
 .detail-list dt { font-weight: 600; color: var(--color-muted); font-size: 0.88rem; }
 .detail-list dd { margin: 0; overflow-wrap: anywhere; }
+
+.dialog-wide { width: min(780px, calc(100vw - 32px)); }
+.dialog-body .detail-list { margin: 12px 0 0; }
+.textarea-sm { min-height: 96px; }
+.choice-inline { padding-left: 0; margin-top: 10px; font-size: 0.88rem; color: var(--color-muted); }
+
+/* Detalle: seguimiento y acciones */
+.detail-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.detail-tema {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.detail-section { border-top: 1px solid var(--color-border); padding-top: 14px; }
+.detail-section h3 { font-size: 0.95rem; color: var(--color-primary); margin-bottom: 10px; }
+.followup-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.followup-item {
+  border-left: 3px solid var(--color-accent);
+  background: var(--color-surface-2);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 8px 12px;
+}
+.followup-item.is-event { border-left-color: var(--color-border-strong); }
+.followup-head { font-size: 0.8rem; color: var(--color-muted); margin-bottom: 4px; }
+.followup-head strong { color: var(--color-text); }
+.followup-empty { color: var(--color-faint); font-size: 0.88rem; }
+.detail-actions-grid { display: grid; gap: 10px; }
+.detail-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.detail-admin { font-size: 0.8rem; color: var(--color-faint); }
 
 /* ==========================================================================
    15. RESPONSIVE
@@ -927,7 +962,8 @@ th[aria-sort="descending"] .th-sort::after { content: "↓"; opacity: 1; }
   body { font-size: 14.5px; }
   .brand-subtitle { display: none; }
   .brand-title { font-size: 0.92rem; }
-  .header-link { display: none; }
+  a.header-link { display: none; }
+  .header-button { padding: 4px 8px; font-size: 0.8rem; }
   .nav-link { padding: 11px 10px; font-size: 0.86rem; }
   .app-main { padding-top: 18px; }
   .hero { padding: 28px 18px 22px; }

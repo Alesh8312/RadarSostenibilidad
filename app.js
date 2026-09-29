@@ -2,13 +2,18 @@
    RADAR SEMANAL DE SOSTENIBILIDAD — app.js
    Aplicación estática (HTML + CSS + JavaScript) para GitHub Pages.
 
-   Cómo funciona, en pocas palabras:
-   • REGISTRAR: la persona diligencia el formulario; la aplicación arma el
-     reporte y abre GitHub con el título y el cuerpo ya escritos. La persona
-     solo presiona "Create". (No hay tokens ni contraseñas en este archivo.)
-   • CONSULTAR y RADAR: la aplicación lee los Issues del repositorio con la
-     API pública de GitHub, interpreta sus secciones y construye la tabla,
-     los indicadores, los gráficos, el informe y el Excel.
+   Cómo funciona, en pocas palabras (fuente "puente", la recomendada):
+   • La página NO guarda contraseñas ni tokens. Envía cada reporte a un
+     "puente" (Google Apps Script) protegido con el código del equipo.
+   • El puente guarda el reporte como Issue en el repositorio de datos de
+     GitHub (puede ser privado) usando un token que solo existe en el puente.
+   • Cualquier persona con el código del equipo puede registrar, corregir,
+     dar seguimiento y cerrar temas sin tener cuenta de GitHub.
+   • CONSULTAR y RADAR: la tabla, los indicadores, los gráficos, el informe
+     y el Excel se construyen con los reportes que entrega el puente.
+
+   Otras fuentes: "github" (sin puente: abre GitHub con el reporte
+   prellenado; exige cuenta de GitHub) y DEMO_MODE (datos ficticios).
 
    Índice del archivo:
      1. Configuración (lo que normalmente se cambia)
@@ -36,19 +41,28 @@
 "use strict";
 
 /* ==========================================================================
-   1. CONFIGURACIÓN — cambie aquí owner y repo (README, paso 3)
+   1. CONFIGURACIÓN — README, "Conectar la página con el puente"
    ========================================================================== */
 
 /**
  * DEMO_MODE = true  → carga 12 registros ficticios para probar todo
  *                     (no consulta ni escribe nada en GitHub).
- * DEMO_MODE = false → trabaja con el repositorio real definido abajo.
+ * DEMO_MODE = false → trabaja con la fuente de datos definida abajo.
  */
 const DEMO_MODE = false;
 
 const CONFIG = {
-  owner: "Alesh8312",          // Usuario u organización dueña del repositorio. Ej.: "JBOGLOP"
-  repo: "RadarSostenibilidad",           // Nombre del repositorio. Ej.: "radar-sostenibilidad"
+  // Fuente de datos:
+  //   "puente" → cualquier persona registra con el código del equipo (recomendado).
+  //   "github" → sin puente; cada persona necesita cuenta de GitHub.
+  dataSource: "puente",
+
+  // URL del puente (Google Apps Script). Termina en /exec. README, paso P6.
+  puenteUrl: "PEGAR_AQUI_LA_URL_DEL_PUENTE",
+
+  // Solo para dataSource: "github" (repositorio público donde están los Issues).
+  owner: "CAMBIAR_AQUI",          // Usuario u organización dueña del repositorio. Ej.: "Alesh8312"
+  repo: "CAMBIAR_AQUI",           // Nombre del repositorio. Ej.: "RadarSostenibilidad"
   label: "radar-sostenibilidad",  // Etiqueta de los reportes del Radar
   titlePrefix: "[RADAR]",         // Inicio del título de cada reporte
 
@@ -56,7 +70,7 @@ const CONFIG = {
   // GitHub muestra un error "404" a quien NO sea colaborador del repositorio
   // cuando el enlace incluye etiquetas. Déjelo en false para que CUALQUIER
   // persona pueda registrar temas. La etiqueta se agrega automáticamente con
-  // el archivo .github/workflows/radar-etiqueta.yml (README, paso 4).
+  // el archivo .github/workflows/radar-etiqueta.yml (README, anexo "Modo sin puente").
   labelInUrl: false,
 
   // true = solo se cuentan reportes creados por el dueño o por colaboradores
@@ -64,15 +78,12 @@ const CONFIG = {
   // un repositorio público). false = se aceptan reportes de cualquier cuenta.
   onlyCollaborators: false,
 
-  cacheMinutes: 5,            // Minutos que se reutilizan los datos antes de volver a consultar GitHub
-  maxUrlLength: 7000,         // Si el reporte es más largo, se usa "copiar y pegar" en GitHub
+  cacheMinutes: 5,            // Minutos que se reutilizan los datos antes de volver a consultar
+  maxUrlLength: 7000,         // (fuente "github") si el reporte es más largo, se usa "copiar y pegar"
   titleSummaryMaxLength: 80,  // Longitud máxima del resumen del tema en el título
   topPeopleInChart: 10,       // Personas que muestra el gráfico "Reportes por persona"
   requestTimeoutMs: 20000,    // Tiempo máximo de espera de cada consulta a GitHub
-
-  // Fuente de datos. "github" = repositorio público vía API de GitHub.
-  // Para producción con información confidencial vea la sección 6 y el README.
-  dataSource: "github"
+  puenteTimeoutMs: 60000      // Tiempo máximo de espera del puente (la primera vez del día puede tardar)
 };
 
 /* ==========================================================================
@@ -231,12 +242,18 @@ const state = {
   usandoCacheVieja: false,
   sinConfigurar: false,
   necesitaRecarga: false,
-  pendiente: null,       // último reporte preparado en esta sesión
-  demoLocal: [],         // temas registrados en modo demo (solo en memoria)
+  pendiente: null,       // último reporte registrado o preparado en esta sesión
   graficos: {},
   chartConfigurado: false,
   copia: { cuerpo: "", url: "", titulo: "" },
-  ultimoRegistro: null   // división y persona del último registro (para "Registrar otro tema")
+  ultimoRegistro: null,  // división y persona del último registro (para "Registrar otro tema")
+  codigo: "",            // código del equipo (fuente "puente")
+  promesaCodigo: null,
+  edicion: null,         // reporte que se está corrigiendo en el formulario
+  detalle: null,         // reporte abierto en la ventana de detalle
+  ultimoQuien: "",       // última persona elegida en "Quién realiza la acción"
+  enviando: false,
+  demo: null             // datos del modo demostración (solo en memoria)
 };
 
 /* ==========================================================================
@@ -422,26 +439,46 @@ function serialExcel(iso) {
 
 /* ---------- Almacenamiento local (opcional; la app funciona sin él) ---------- */
 
-const almacen = {
-  leer(clave) {
-    try {
-      const valor = window.localStorage.getItem(clave);
-      return valor ? JSON.parse(valor) : null;
-    } catch (e) {
-      return null;
+function crearAlmacen(tipo) {
+  const obtener = () => (tipo === "sesion" ? window.sessionStorage : window.localStorage);
+  return {
+    leer(clave) {
+      try {
+        const valor = obtener().getItem(clave);
+        return valor ? JSON.parse(valor) : null;
+      } catch (e) {
+        return null;
+      }
+    },
+    guardar(clave, valor) {
+      try {
+        obtener().setItem(clave, JSON.stringify(valor));
+      } catch (e) {
+        /* Sin almacenamiento disponible (modo privado): se ignora. */
+      }
+    },
+    borrar(clave) {
+      try {
+        obtener().removeItem(clave);
+      } catch (e) {
+        /* sin efecto */
+      }
     }
-  },
-  guardar(clave, valor) {
-    try {
-      window.localStorage.setItem(clave, JSON.stringify(valor));
-    } catch (e) {
-      /* Sin almacenamiento disponible (modo privado): se ignora. */
-    }
-  }
-};
+  };
+}
+
+const almacen = crearAlmacen("local");
+const almacenSesion = crearAlmacen("sesion");
+const CLAVE_CODIGO = "radar-codigo-v1";
+
+/** Con el puente los datos no son públicos: se guardan solo mientras la pestaña esté abierta. */
+function almacenCache() {
+  return CONFIG.dataSource === "puente" ? almacenSesion : almacen;
+}
 
 function claveCache() {
-  return `radar-cache-v1:${CONFIG.owner}/${CONFIG.repo}:${CONFIG.onlyCollaborators ? "colab" : "todos"}`;
+  const origen = CONFIG.dataSource === "puente" ? CONFIG.puenteUrl : `${CONFIG.owner}/${CONFIG.repo}`;
+  return `radar-cache-v2:${CONFIG.dataSource}:${origen}:${CONFIG.onlyCollaborators ? "colab" : "todos"}`;
 }
 
 /* ---------- Mensajes emergentes ---------- */
@@ -471,9 +508,21 @@ function textoConNegrita(elemento, partes) {
 
 /* ---------- Configuración ---------- */
 
+/** Fuente "github": ¿se configuraron owner y repo? */
 function configuracionCompleta() {
   const invalido = (valor) => !valor || /CAMBIAR_AQUI/i.test(valor);
   return !invalido(CONFIG.owner) && !invalido(CONFIG.repo);
+}
+
+/** Fuente "puente": ¿la URL tiene la forma de una aplicación web de Apps Script? */
+function puenteConfigurado() {
+  return /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(String(CONFIG.puenteUrl || "").trim());
+}
+
+function textoConfiguracionPendiente() {
+  return CONFIG.dataSource === "puente"
+    ? "Pegue la URL del puente en app.js (puenteUrl; README, paso P6) o active DEMO_MODE = true."
+    : "Cambie owner y repo al inicio de app.js o active DEMO_MODE = true.";
 }
 
 function urlRepositorio() {
@@ -487,39 +536,175 @@ function esUrlGithubSegura(url) {
 /* ==========================================================================
    6. FUENTES DE DATOS
    Todas las fuentes tienen la misma forma:
-     nombre             → texto que se muestra como "Fuente"
-     cargar(opciones)   → devuelve la lista de reportes
-     prepararNuevo(reg) → registra (o prepara el registro de) un nuevo reporte
-
-   PRODUCCIÓN CON INFORMACIÓN CONFIDENCIAL: una página estática no puede leer
-   un repositorio privado sin exponer un token. Para ese caso agregue aquí una
-   fuente "proxy" con esta misma forma, que llame a un servicio intermedio
-   seguro (el que guarda la credencial del lado del servidor), y cambie
-   CONFIG.dataSource = "proxy". El resto de la aplicación no cambia.
+     nombre        → texto que se muestra como "Fuente"
+     enApp         → true: registrar, corregir y dar seguimiento dentro de la app
+                     false: abrir GitHub con el reporte prellenado
+     configurada() → ¿está lista para usarse?
+     cargar()      → devuelve la lista de reportes
+     Si enApp:  crear, editar, comentar, cambiarEstado, comentarios
+     Si no:     prepararNuevo
+   Para usar otro servicio en el futuro basta con agregar una fuente con esta
+   misma forma y cambiar CONFIG.dataSource. El resto de la aplicación no cambia.
    ========================================================================== */
 
 const FUENTES = {
+  /* Puente seguro (Google Apps Script): nadie necesita cuenta de GitHub. */
+  puente: {
+    nombre: "Puente seguro del Radar",
+    enApp: true,
+    configurada: puenteConfigurado,
+    async cargar() {
+      const r = await llamarPuente("listar");
+      return (r.issues || []).filter(esIssueDelRadar).map(issueAReporte);
+    },
+    async crear(registro) {
+      const r = await llamarPuente("crear", {
+        titulo: construirTitulo(registro.activo, registro.tema),
+        cuerpo: construirCuerpo(registro)
+      });
+      return { numero: r.numero, url: esUrlGithubSegura(r.url) ? r.url : "" };
+    },
+    async editar(reporte, registro, quien) {
+      await llamarPuente("editar", {
+        numero: reporte.numero,
+        titulo: construirTitulo(registro.activo, registro.tema),
+        cuerpo: construirCuerpo(registro),
+        quien
+      });
+    },
+    async comentar(reporte, quien, texto) {
+      await llamarPuente("comentar", { numero: reporte.numero, quien, texto });
+    },
+    async cambiarEstado(reporte, estado, quien) {
+      await llamarPuente("estado", { numero: reporte.numero, estado, quien });
+    },
+    async comentarios(reporte) {
+      const r = await llamarPuente("comentarios", { numero: reporte.numero });
+      return (r.comentarios || []).map(interpretarComentario);
+    }
+  },
+
+  /* GitHub directo (sin puente): cada persona necesita cuenta de GitHub. */
   github: {
     get nombre() {
       return configuracionCompleta() ? `GitHub · ${CONFIG.owner}/${CONFIG.repo}` : "GitHub (sin configurar)";
     },
+    enApp: false,
+    configurada: configuracionCompleta,
     cargar: cargarDesdeGitHub,
     prepararNuevo: prepararEnGitHub
   },
 
+  /* Demostración: todo ocurre en memoria y se pierde al recargar. */
   demo: {
     nombre: "Datos de demostración (ficticios)",
+    enApp: true,
+    configurada: () => true,
     async cargar() {
-      await pausa(250);
-      return DEMO_REPORTES.map(demoAReporte).concat(state.demoLocal);
+      await pausa(200);
+      return datosDemo().reportes.map((r) => ({ ...r, instancias: r.instancias.slice() }));
     },
-    prepararNuevo: registrarEnDemo
+    async crear(registro) {
+      await pausa(300);
+      const ahora = new Date().toISOString();
+      const reporte = {
+        id: registro.idRadar,
+        idRadar: registro.idRadar,
+        numero: null,
+        url: "",
+        titulo: construirTitulo(registro.activo, registro.tema),
+        estado: "abierto",
+        fechaISO: registro.fechaISO,
+        fechaTexto: isoATexto(registro.fechaISO),
+        division: registro.division,
+        persona: registro.persona,
+        email: registro.email,
+        activo: registro.activo,
+        instancias: registro.instancias.slice(),
+        tema: registro.tema,
+        comentarios: 0,
+        creadoEn: ahora,
+        actualizadoEn: ahora,
+        demo: true
+      };
+      datosDemo().reportes.push(reporte);
+      return { numero: null, url: "" };
+    },
+    async editar(reporte, registro, quien) {
+      await pausa(300);
+      const r = buscarDemo(reporte.id);
+      Object.assign(r, {
+        titulo: construirTitulo(registro.activo, registro.tema),
+        fechaISO: registro.fechaISO,
+        fechaTexto: isoATexto(registro.fechaISO),
+        division: registro.division,
+        persona: registro.persona,
+        email: registro.email,
+        activo: registro.activo,
+        instancias: registro.instancias.slice(),
+        tema: registro.tema
+      });
+      agregarComentarioDemo(r, "Corrección", quien, "Se corrigió el reporte desde el Radar.", true);
+    },
+    async comentar(reporte, quien, texto) {
+      await pausa(200);
+      agregarComentarioDemo(buscarDemo(reporte.id), "Seguimiento", quien, texto, false);
+    },
+    async cambiarEstado(reporte, estado, quien) {
+      await pausa(200);
+      const r = buscarDemo(reporte.id);
+      r.estado = estado;
+      agregarComentarioDemo(r, estado === "cerrado" ? "Tema resuelto" : "Tema reabierto", quien,
+        estado === "cerrado" ? "El tema se marcó como resuelto desde el Radar." : "El tema se reabrió desde el Radar.", true);
+    },
+    async comentarios(reporte) {
+      await pausa(150);
+      return (datosDemo().comentarios[reporte.id] || []).map((c) => ({ ...c }));
+    }
   }
 };
 
 function fuenteDeDatos() {
   if (DEMO_MODE) return FUENTES.demo;
-  return FUENTES[CONFIG.dataSource] || FUENTES.github;
+  return FUENTES[CONFIG.dataSource] || FUENTES.puente;
+}
+
+/* ---------- Datos de demostración en memoria ---------- */
+
+function datosDemo() {
+  if (!state.demo) {
+    const reportes = DEMO_REPORTES.map(demoAReporte);
+    const comentarios = {};
+    reportes.forEach((r) => {
+      comentarios[r.id] = [];
+      for (let k = 1; k <= r.comentarios; k += 1) {
+        const fecha = new Date(r.creadoEn);
+        fecha.setDate(fecha.getDate() + k);
+        comentarios[r.id].push({
+          titulo: "Seguimiento",
+          persona: r.persona,
+          fecha: fechaHoraTexto(fecha),
+          texto: `Avance de ejemplo n.º ${k} sobre este tema (dato ficticio).`,
+          evento: false
+        });
+      }
+    });
+    state.demo = { reportes, comentarios };
+  }
+  return state.demo;
+}
+
+function buscarDemo(id) {
+  const r = datosDemo().reportes.find((x) => x.id === id);
+  if (!r) throw crearError("No se encontró el registro de demostración.");
+  return r;
+}
+
+function agregarComentarioDemo(reporte, titulo, quien, texto, evento) {
+  const lista = datosDemo().comentarios[reporte.id] || (datosDemo().comentarios[reporte.id] = []);
+  lista.push({ titulo, persona: quien, fecha: fechaHoraTexto(new Date()), texto, evento });
+  reporte.comentarios = lista.length;
+  reporte.actualizadoEn = new Date().toISOString();
 }
 
 function demoAReporte(d, indice) {
@@ -546,6 +731,160 @@ function demoAReporte(d, indice) {
     creadoEn: creado.toISOString(),
     actualizadoEn: creado.toISOString(),
     demo: true
+  };
+}
+
+/* ---------- Puente: código del equipo y llamadas ---------- */
+
+function codigoGuardado() {
+  if (state.codigo) return state.codigo;
+  const guardado = almacen.leer(CLAVE_CODIGO) || almacenSesion.leer(CLAVE_CODIGO);
+  if (typeof guardado === "string" && guardado) state.codigo = guardado;
+  return state.codigo;
+}
+
+function guardarCodigo(codigo, recordar) {
+  state.codigo = codigo;
+  (recordar ? almacen : almacenSesion).guardar(CLAVE_CODIGO, codigo);
+  (recordar ? almacenSesion : almacen).borrar(CLAVE_CODIGO);
+  actualizarBotonSalir();
+}
+
+function olvidarCodigo() {
+  state.codigo = "";
+  almacen.borrar(CLAVE_CODIGO);
+  almacenSesion.borrar(CLAVE_CODIGO);
+  actualizarBotonSalir();
+}
+
+function actualizarBotonSalir() {
+  const boton = $("#logout-btn");
+  if (boton) boton.hidden = !(fuenteDeDatos() === FUENTES.puente && codigoGuardado());
+}
+
+function errorSinCodigo() {
+  const e = crearError("Ingrese el código del equipo para continuar.");
+  e.tipo = "sin-codigo";
+  return e;
+}
+
+/** Muestra la ventana del código del equipo. Devuelve {codigo, recordar} o falla si se cancela. */
+function pedirCodigo(mensajeError = "") {
+  if (state.promesaCodigo) return state.promesaCodigo;
+  $("#code-error").textContent = mensajeError ? `⚠ ${mensajeError}` : "";
+  $("#code-input").value = "";
+  state.promesaCodigo = new Promise((resolver, rechazar) => {
+    state.resolverCodigo = { resolver, rechazar };
+  }).finally(() => {
+    state.promesaCodigo = null;
+    state.resolverCodigo = null;
+  });
+  abrirDialogo("#code-dialog");
+  setTimeout(() => $("#code-input").focus(), 50);
+  return state.promesaCodigo;
+}
+
+function iniciarDialogoCodigo() {
+  const dialogo = $("#code-dialog");
+  $("#code-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const codigo = $("#code-input").value.trim();
+    if (codigo.length < 8) {
+      $("#code-error").textContent = "⚠ El código del equipo tiene al menos 8 caracteres.";
+      return;
+    }
+    const recordar = $("#code-remember").checked;
+    if (state.resolverCodigo) state.resolverCodigo.resolver({ codigo, recordar });
+    cerrarDialogo(dialogo);
+  });
+  // Cerrar la ventana (Esc o "Ahora no") cancela la solicitud pendiente.
+  dialogo.addEventListener("close", () => {
+    if (state.resolverCodigo) state.resolverCodigo.rechazar(errorSinCodigo());
+  });
+}
+
+/**
+ * Llama al puente. Pide el código del equipo si hace falta y lo vuelve a
+ * pedir si es incorrecto. Solo guarda el código cuando el puente lo acepta.
+ */
+async function llamarPuente(accion, datos = {}) {
+  let codigo = codigoGuardado();
+  let recordar = null; // null = el código ya estaba guardado
+  for (let intento = 0; intento < 4; intento += 1) {
+    if (!codigo) {
+      const respuestaCodigo = await pedirCodigo(intento > 0 ? "Código del equipo incorrecto. Intente nuevamente." : "");
+      codigo = respuestaCodigo.codigo;
+      recordar = respuestaCodigo.recordar;
+    }
+    const respuesta = await enviarAlPuente({ ...datos, accion, codigo });
+    if (respuesta && respuesta.ok) {
+      if (recordar !== null) guardarCodigo(codigo, recordar);
+      return respuesta;
+    }
+    if (respuesta && respuesta.error === "codigo") {
+      olvidarCodigo();
+      codigo = "";
+      recordar = null;
+      continue;
+    }
+    const e = crearError((respuesta && respuesta.mensaje) || "El puente no pudo completar la acción.");
+    e.tipo = (respuesta && respuesta.error) || "puente";
+    throw e;
+  }
+  const e = crearError("Código del equipo incorrecto.");
+  e.tipo = "codigo";
+  throw e;
+}
+
+async function enviarAlPuente(cuerpo) {
+  const controlador = new AbortController();
+  const temporizador = setTimeout(() => controlador.abort(), CONFIG.puenteTimeoutMs);
+  let respuesta;
+  try {
+    // Texto plano (sin encabezados especiales): así el navegador no necesita permisos extra.
+    respuesta = await fetch(String(CONFIG.puenteUrl).trim(), {
+      method: "POST",
+      body: JSON.stringify(cuerpo),
+      redirect: "follow",
+      cache: "no-store",
+      signal: controlador.signal
+    });
+  } catch (error) {
+    const e = crearError(error.name === "AbortError"
+      ? "El puente tardó demasiado en responder. Intente nuevamente."
+      : "No fue posible conectarse con el puente. Revise su conexión, la URL del puente en app.js y que la implementación permita el acceso a «Cualquier usuario».");
+    e.tipo = "red";
+    throw e;
+  } finally {
+    clearTimeout(temporizador);
+  }
+  if (!respuesta.ok) {
+    const e = crearError(`El puente respondió con un error (código ${respuesta.status}).`);
+    e.tipo = "red";
+    throw e;
+  }
+  try {
+    return await respuesta.json();
+  } catch (error) {
+    const e = crearError("Respuesta inesperada del puente. Verifique la URL en app.js (debe terminar en /exec).");
+    e.tipo = "red";
+    throw e;
+  }
+}
+
+/** Convierte un comentario de GitHub en una entrada de seguimiento. */
+function interpretarComentario(c) {
+  const cuerpo = String(c.body || "").replace(/\r\n?/g, "\n");
+  const evento = /<!--\s*radar-evento/.test(cuerpo);
+  const limpio = cuerpo.replace(/<!--[\s\S]*?-->/g, "").trim();
+  const m = limpio.match(/^\*\*(.+?)\*\*\s*·\s*(.+?)\s*·\s*(\d{2}\/\d{2}\/\d{4}(?: \d{2}:\d{2})?)\s*(?:\n+([\s\S]*))?$/);
+  if (m) return { titulo: m[1], persona: m[2], fecha: m[3], texto: (m[4] || "").trim(), evento };
+  return {
+    titulo: "Comentario",
+    persona: (c.user && c.user.login) || "GitHub",
+    fecha: fechaHoraTexto(new Date(c.created_at)),
+    texto: limpio,
+    evento: false
   };
 }
 
@@ -611,7 +950,7 @@ function errorDeGitHub(respuesta) {
   } else if (respuesta.status === 404) {
     mensaje = "No se encontró el repositorio. Verifique owner y repo en app.js y que el repositorio sea público.";
   } else if (respuesta.status === 410) {
-    mensaje = "Los Issues están desactivados en el repositorio (README, paso 5).";
+    mensaje = "Los Issues están desactivados en el repositorio (Settings → General → Features → Issues).";
   } else if (respuesta.status === 403 || respuesta.status === 429) {
     mensaje = "GitHub limitó temporalmente las consultas. Intente nuevamente en unos minutos.";
   } else {
@@ -772,12 +1111,17 @@ function establecerReportes(lista) {
 }
 
 function leerCache() {
-  const c = almacen.leer(claveCache());
+  const c = almacenCache().leer(claveCache());
   return c && Array.isArray(c.reportes) && c.guardadoEn ? c : null;
 }
 
 function guardarCache(reportes) {
-  almacen.guardar(claveCache(), { guardadoEn: Date.now(), reportes });
+  almacenCache().guardar(claveCache(), { guardadoEn: Date.now(), reportes });
+}
+
+function borrarCache() {
+  almacen.borrar(claveCache());
+  almacenSesion.borrar(claveCache());
 }
 
 /**
@@ -787,7 +1131,7 @@ function guardarCache(reportes) {
 function cargarReportes({ forzar = false, silencioso = false } = {}) {
   if (state.cargando && state.promesaCarga) return state.promesaCarga;
 
-  if (!DEMO_MODE && !configuracionCompleta()) {
+  if (!fuenteDeDatos().configurada()) {
     state.sinConfigurar = true;
     state.cargado = true;
     refrescarTodo();
@@ -819,7 +1163,8 @@ function cargarReportes({ forzar = false, silencioso = false } = {}) {
       state.cargado = true;
     } catch (error) {
       state.error = error;
-      if (!state.cargado && !DEMO_MODE) {
+      const sinAcceso = error.tipo === "sin-codigo" || error.tipo === "codigo";
+      if (!state.cargado && !DEMO_MODE && !sinAcceso) {
         const cache = leerCache();
         if (cache) {
           establecerReportes(cache.reportes);
@@ -828,8 +1173,8 @@ function cargarReportes({ forzar = false, silencioso = false } = {}) {
           state.cargado = true;
         }
       }
-      if (!silencioso) {
-        mostrarMensaje(`⚠ ${error.mensajeUsuario || "No fue posible conectarse con GitHub."}`, "error", 8000);
+      if (!silencioso && !sinAcceso) {
+        mostrarMensaje(`⚠ ${error.mensajeUsuario || "No fue posible conectarse."}`, "error", 8000);
       }
     } finally {
       state.cargando = false;
@@ -863,11 +1208,14 @@ function refrescarEstados() {
 
   let textoResumen = "";
   if (state.sinConfigurar) {
-    textoResumen = "La aplicación no está conectada a un repositorio.";
-    inicio.textContent = "⚠ Pendiente: configurar el repositorio en app.js (README, paso 3).";
+    textoResumen = "La aplicación no está conectada.";
+    inicio.textContent = "⚠ Pendiente: completar la configuración en app.js (README).";
   } else if (state.cargando && !state.cargado) {
     textoResumen = "Cargando reportes…";
     inicio.textContent = "Cargando reportes…";
+  } else if (!state.cargado && state.error && state.error.tipo === "sin-codigo") {
+    textoResumen = "Ingrese el código del equipo para ver los reportes.";
+    inicio.textContent = "🔒 Ingrese el código del equipo para ver los reportes.";
   } else if (!state.cargado && state.error) {
     textoResumen = "No fue posible cargar los reportes.";
     inicio.textContent = "⚠ No fue posible cargar los reportes. Intente nuevamente.";
@@ -876,7 +1224,7 @@ function refrescarEstados() {
     const ultimo = state.reportes.reduce((max, r) => (r.fechaISO > max ? r.fechaISO : max), "");
     textoResumen = `Mostrando ${plural(state.filtrados.length, "reporte", "reportes")} de ${total.toLocaleString("es-CO")}`;
     if (state.cargadoEn) textoResumen += ` · Datos de las ${horaTexto(state.cargadoEn)}`;
-    if (state.usandoCacheVieja) textoResumen += " (guardados; sin conexión con GitHub)";
+    if (state.usandoCacheVieja) textoResumen += " (guardados; sin conexión)";
     if (state.cargando) textoResumen += " · Actualizando…";
     inicio.textContent = total
       ? `${plural(total, "tema registrado", "temas registrados")} · último reporte: ${isoATexto(ultimo)}`
@@ -899,14 +1247,22 @@ function pintarEstado(contenedor) {
 
   if (state.sinConfigurar) {
     contenedor.append(
-      crear("p", { className: "state-title", text: "⚠ La aplicación aún no está conectada a un repositorio." }),
-      crear("p", { className: "state-detail", text: "Cambie owner y repo al inicio de app.js (README, paso 3) o active DEMO_MODE = true." })
+      crear("p", { className: "state-title", text: "⚠ La aplicación aún no está conectada." }),
+      crear("p", { className: "state-detail", text: textoConfiguracionPendiente() })
     );
     contenedor.hidden = false;
     return;
   }
   if (state.cargando && !state.cargado) {
     contenedor.append(crear("p", {}, [crear("span", { className: "spinner", attrs: { "aria-hidden": "true" } }), "Cargando reportes…"]));
+    contenedor.hidden = false;
+    return;
+  }
+  if (!state.cargado && state.error && state.error.tipo === "sin-codigo") {
+    contenedor.append(
+      crear("p", { className: "state-title", text: "🔒 Ingrese el código del equipo para ver los reportes." }),
+      crear("button", { className: "btn btn-primary btn-sm", text: "Ingresar código", attrs: { type: "button", "data-action": "retry" } })
+    );
     contenedor.hidden = false;
     return;
   }
@@ -989,6 +1345,7 @@ function iniciarFormulario() {
   const form = $("#report-form");
   llenarSelect($("#f-division"), DIVISIONES, "Seleccione una división");
   llenarSelect($("#f-activo"), ACTIVOS, "Seleccione un activo / BL");
+  llenarSelect($("#f-corrector"), nombresPersonas(), "Seleccione su nombre");
 
   const listaInstancias = $("#f-instancias");
   INSTANCIAS.forEach((instancia, i) => {
@@ -1004,6 +1361,7 @@ function iniciarFormulario() {
   $("#f-fecha").addEventListener("input", () => { actualizarFechaVisible(); limpiarError("fecha"); });
   $("#f-fecha").addEventListener("change", () => { actualizarFechaVisible(); limpiarError("fecha"); });
   $("#f-division").addEventListener("change", () => limpiarError("division"));
+  $("#f-corrector").addEventListener("change", () => limpiarError("corrector"));
   $("#f-activo").addEventListener("change", () => { limpiarError("activo"); actualizarVistaPrevia(); });
   listaInstancias.addEventListener("change", () => limpiarError("instancias"));
   const previaDiferida = debounce(actualizarVistaPrevia, 150);
@@ -1017,6 +1375,18 @@ function iniciarFormulario() {
 function actualizarFechaVisible() {
   const iso = $("#f-fecha").value;
   $("#f-fecha-visible").textContent = esISOValida(iso) ? `Fecha seleccionada: ${isoATexto(iso)}` : "Formato: DD/MM/AAAA";
+}
+
+function nombresPersonas() {
+  return PERSONAS.map((p) => p.nombre).sort((a, b) => a.localeCompare(b, "es"));
+}
+
+/** Agrega una opción al desplegable si no existe (p. ej., un valor antiguo al corregir). */
+function asegurarOpcion(select, valor) {
+  if (valor && !Array.from(select.options).some((o) => o.value === valor)) {
+    select.append(crear("option", { text: valor, attrs: { value: valor } }));
+  }
+  select.value = valor || "";
 }
 
 /* ---------- Lista "Quién reporta" con buscador ---------- */
@@ -1171,12 +1541,14 @@ function leerFormulario() {
     persona: combo.seleccion,
     activo: $("#f-activo").value,
     instancias: $$("#f-instancias input:checked").map((c) => c.value),
-    tema: $("#f-tema").value.replace(/\r\n?/g, "\n").trim()
+    tema: $("#f-tema").value.replace(/\r\n?/g, "\n").trim(),
+    corrector: $("#f-corrector").value
   };
 }
 
 function validarFormulario(datos) {
   const errores = {};
+  if (state.edicion && !datos.corrector) errores.corrector = "Indique quién realiza la corrección.";
   if (!esISOValida(datos.fechaISO)) errores.fecha = "Seleccione una fecha válida.";
   if (!datos.division) errores.division = "Seleccione la división.";
   if (!datos.persona) {
@@ -1189,7 +1561,7 @@ function validarFormulario(datos) {
   return errores;
 }
 
-const CAMPOS_FORMULARIO = ["fecha", "division", "persona", "activo", "instancias", "tema"];
+const CAMPOS_FORMULARIO = ["corrector", "fecha", "division", "persona", "activo", "instancias", "tema"];
 
 function mostrarErroresFormulario(errores) {
   for (const campo of CAMPOS_FORMULARIO) {
@@ -1283,7 +1655,7 @@ function actualizarVistaPrevia() {
 
   let texto = plural(tema.length, "carácter", "caracteres");
   let extenso = false;
-  if (!DEMO_MODE && configuracionCompleta() && tema) {
+  if (fuenteDeDatos() === FUENTES.github && configuracionCompleta() && tema) {
     const cuerpo = construirCuerpo({
       fechaISO: $("#f-fecha").value || fechaLocalISO(),
       division: $("#f-division").value || "Territorios Compartidos",
@@ -1320,7 +1692,7 @@ function alEnviarFormulario(evento) {
   }
 
   const registro = {
-    idRadar: generarIdRadar(),
+    idRadar: state.edicion ? (state.edicion.idRadar || generarIdRadar()) : generarIdRadar(),
     fechaISO: datos.fechaISO,
     division: datos.division,
     persona: datos.persona.nombre,
@@ -1329,16 +1701,122 @@ function alEnviarFormulario(evento) {
     instancias: datos.instancias,
     tema: datos.tema
   };
-  state.ultimoRegistro = { division: datos.division, persona: datos.persona };
 
-  fuenteDeDatos().prepararNuevo(registro);
+  const fuente = fuenteDeDatos();
+  if (!fuente.configurada()) {
+    $("#config-alert").hidden = false;
+    mostrarMensaje(`⚠ La aplicación aún no está conectada. ${textoConfiguracionPendiente()}`, "error", 9000);
+    return;
+  }
+  if (state.edicion) {
+    guardarCorreccion(registro, datos.corrector);
+    return;
+  }
+  state.ultimoRegistro = { division: datos.division, persona: datos.persona };
+  if (fuente.enApp) registrarEnApp(registro);
+  else fuente.prepararNuevo(registro);
+}
+
+/** Bloquea el botón mientras se guarda, para evitar registros duplicados. */
+function ponerEnviando(activo, texto = "") {
+  state.enviando = activo;
+  const boton = $("#btn-submit");
+  boton.disabled = activo;
+  boton.textContent = activo ? texto : (state.edicion ? "Guardar cambios" : "Registrar tema");
+  $("#btn-cancel-edit").disabled = activo;
+}
+
+/** Puente o demo: guarda el tema sin salir de la aplicación. */
+async function registrarEnApp(registro) {
+  if (state.enviando) return;
+  ponerEnviando(true, "Registrando…");
+  try {
+    const resultado = await fuenteDeDatos().crear(registro);
+    const titulo = construirTitulo(registro.activo, registro.tema);
+    state.pendiente = { idRadar: registro.idRadar, numero: resultado.numero, titulo, preparadoEn: Date.now(), url: resultado.url };
+    mostrarPanelExito({ modo: "app", titulo, numero: resultado.numero });
+    cargarReportes({ forzar: true, silencioso: true });
+  } catch (error) {
+    if (error.tipo === "sin-codigo") {
+      mostrarMensaje("Para registrar necesita el código del equipo. Sus datos siguen en el formulario.", "warning", 7000);
+    } else {
+      mostrarMensaje(`⚠ ${error.mensajeUsuario || "No fue posible registrar el tema."} Sus datos siguen en el formulario.`, "error", 9000);
+    }
+  } finally {
+    ponerEnviando(false);
+  }
+}
+
+/* ---------- Corregir un registro existente (puente o demo) ---------- */
+
+function iniciarCorreccion(reporte) {
+  state.edicion = reporte;
+  cerrarDialogo($("#detail-dialog"));
+  const form = $("#report-form");
+  form.reset();
+  $("#success-panel").hidden = true;
+  form.hidden = false;
+
+  $("#f-fecha").value = reporte.fechaISO;
+  actualizarFechaVisible();
+  asegurarOpcion($("#f-division"), reporte.division);
+  asegurarOpcion($("#f-activo"), reporte.activo);
+  const conocida = PERSONAS.find((p) => normalizar(p.nombre) === normalizar(reporte.persona));
+  combo.seleccion = conocida || { nombre: reporte.persona, email: reporte.email || "" };
+  $("#f-persona").value = combo.seleccion.nombre;
+  mostrarCorreoPersona();
+  for (const casilla of $$("#f-instancias input")) {
+    casilla.checked = reporte.instancias.some((i) => normalizar(i) === normalizar(casilla.value));
+  }
+  $("#f-tema").value = reporte.tema;
+  $("#f-corrector").value = state.ultimoQuien || "";
+
+  $("#form-title").textContent = reporte.numero ? `Corregir tema #${reporte.numero}` : "Corregir tema";
+  $("#edit-note").textContent = "Está corrigiendo un registro existente. Cambie lo necesario y presione «Guardar cambios». La corrección quedará registrada con su nombre y la fecha.";
+  $("#edit-note").hidden = false;
+  $('.field[data-field="corrector"]').hidden = false;
+  $("#btn-cancel-edit").hidden = false;
+  $("#btn-submit").textContent = "Guardar cambios";
+  mostrarErroresFormulario({});
+  actualizarVistaPrevia();
+
+  if (window.location.hash !== "#registrar") window.location.hash = "#registrar";
+  else mostrarVista("registrar");
+}
+
+function salirDeEdicion() {
+  state.edicion = null;
+  $("#form-title").textContent = "Registrar tema";
+  $("#edit-note").hidden = true;
+  $('.field[data-field="corrector"]').hidden = true;
+  $("#btn-cancel-edit").hidden = true;
+  $("#btn-submit").textContent = "Registrar tema";
+}
+
+async function guardarCorreccion(registro, quien) {
+  if (state.enviando) return;
+  const original = state.edicion;
+  ponerEnviando(true, "Guardando…");
+  try {
+    await fuenteDeDatos().editar(original, registro, quien);
+    state.ultimoQuien = quien;
+    const titulo = construirTitulo(registro.activo, registro.tema);
+    state.pendiente = { idRadar: registro.idRadar, numero: original.numero, id: original.id, titulo, preparadoEn: Date.now() };
+    salirDeEdicion();
+    mostrarPanelExito({ modo: "editado", titulo, numero: original.numero });
+    cargarReportes({ forzar: true, silencioso: true });
+  } catch (error) {
+    mostrarMensaje(`⚠ ${error.mensajeUsuario || "No fue posible guardar los cambios."} Sus cambios siguen en el formulario.`, "error", 9000);
+  } finally {
+    ponerEnviando(false);
+  }
 }
 
 /** GitHub: abre la página de "nuevo Issue" con todo prellenado. */
 function prepararEnGitHub(registro) {
   if (!configuracionCompleta()) {
     $("#config-alert").hidden = false;
-    mostrarMensaje("⚠ Falta configurar owner y repo en app.js (README, paso 3).", "error", 9000);
+    mostrarMensaje("⚠ Falta configurar owner y repo en app.js (README, anexo «Modo sin puente»).", "error", 9000);
     return;
   }
 
@@ -1362,36 +1840,6 @@ function prepararEnGitHub(registro) {
   mostrarPanelExito({ modo: "github", titulo, url, bloqueado: !ventana, largo: false });
 }
 
-/** Modo demo: el tema se agrega solo en memoria (no se envía a ninguna parte). */
-function registrarEnDemo(registro) {
-  const ahora = new Date();
-  const reporte = {
-    id: registro.idRadar,
-    idRadar: registro.idRadar,
-    numero: null,
-    url: "",
-    titulo: construirTitulo(registro.activo, registro.tema),
-    estado: "abierto",
-    fechaISO: registro.fechaISO,
-    fechaTexto: isoATexto(registro.fechaISO),
-    division: registro.division,
-    persona: registro.persona,
-    email: registro.email,
-    activo: registro.activo,
-    instancias: registro.instancias.slice(),
-    tema: registro.tema,
-    comentarios: 0,
-    creadoEn: ahora.toISOString(),
-    actualizadoEn: ahora.toISOString(),
-    demo: true
-  };
-  state.demoLocal.push(reporte);
-  state.reportes.push(prepararReporte(reporte));
-  state.pendiente = { idRadar: reporte.idRadar, titulo: reporte.titulo, preparadoEn: Date.now(), url: "" };
-  refrescarTodo();
-  mostrarPanelExito({ modo: "demo", titulo: reporte.titulo });
-}
-
 /** Abre una pestaña nueva de forma segura. Devuelve null si el navegador la bloqueó. */
 function abrirEnPestana(url) {
   const ventana = window.open(url, "_blank");
@@ -1405,18 +1853,24 @@ function abrirEnPestana(url) {
    13. CONFIRMACIÓN Y "ABRIR EL REGISTRO CREADO"
    ========================================================================== */
 
-function mostrarPanelExito({ modo, titulo, url, bloqueado, largo }) {
+function mostrarPanelExito({ modo, titulo, url, bloqueado, largo, numero }) {
   $("#report-form").hidden = true;
   const panel = $("#success-panel");
   panel.hidden = false;
   $("#success-summary").textContent = titulo;
   $("#open-created-msg").textContent = "";
+  const botonAbrir = $('[data-action="open-created"]');
+  botonAbrir.textContent = modo === "editado" ? "Ver el registro" : "Abrir el registro creado";
 
-  if (modo === "demo") {
-    $("#success-title").textContent = "✓ Tema registrado correctamente";
-    $("#success-text").textContent = "Modo demostración: el tema se agregó solo en esta sesión del navegador (no se envió a GitHub y desaparece al recargar la página).";
+  if (modo === "app" || modo === "editado") {
+    $("#success-title").textContent = modo === "editado" ? "✓ Cambios guardados" : "✓ Tema registrado correctamente";
+    let texto = modo === "editado"
+      ? "La corrección quedó registrada con su nombre y la fecha."
+      : (numero ? `Quedó guardado como registro #${numero}.` : "Quedó guardado.");
+    if (DEMO_MODE) texto += " Modo demostración: se guardó solo en esta sesión del navegador (no se envió a GitHub).";
+    $("#success-text").textContent = texto;
     $("#success-fallback").hidden = true;
-    mostrarMensaje("✓ Tema registrado correctamente.", "success");
+    mostrarMensaje(modo === "editado" ? "✓ Cambios guardados." : "✓ Tema registrado correctamente.", "success");
   } else {
     $("#success-title").textContent = "✓ Reporte preparado correctamente";
     textoConNegrita($("#success-text"), largo
@@ -1435,7 +1889,9 @@ function mostrarPanelExito({ modo, titulo, url, bloqueado, largo }) {
 
 function buscarPendiente(p) {
   if (!p) return null;
-  return state.reportes.find((r) => p.idRadar && r.idRadar === p.idRadar)
+  return state.reportes.find((r) => p.numero && r.numero === p.numero)
+    || state.reportes.find((r) => p.idRadar && r.idRadar === p.idRadar)
+    || state.reportes.find((r) => p.id && r.id === p.id)
     || state.reportes.find((r) => r.titulo === p.titulo && Date.parse(r.creadoEn) >= p.preparadoEn - 120000)
     || null;
 }
@@ -1448,8 +1904,13 @@ async function abrirRegistroCreado() {
     return;
   }
 
-  if (DEMO_MODE) {
+  // Puente o demo: el registro se abre dentro de la aplicación.
+  if (fuenteDeDatos().enApp) {
+    mensaje.textContent = "Abriendo el registro…";
+    if (state.promesaCarga) await state.promesaCarga;
+    if (!buscarPendiente(p)) await cargarReportes({ forzar: true, silencioso: true });
     const r = buscarPendiente(p);
+    mensaje.textContent = r ? "" : "No se encontró el registro. En Consultar reportes presione ↻ Actualizar datos.";
     if (r) abrirDetalle(r);
     return;
   }
@@ -1491,6 +1952,7 @@ async function abrirRegistroCreado() {
 
 /** "Registrar otro tema": limpia el formulario y conserva división y persona. */
 function nuevoReporte() {
+  salirDeEdicion();
   const form = $("#report-form");
   form.reset();
   $("#f-fecha").value = fechaLocalISO();
@@ -1756,7 +2218,8 @@ function celdaTema(r) {
 
 function celdaAcciones(r) {
   const contenedor = crear("div", { className: "cell-actions" });
-  if (r.url) {
+  const enApp = fuenteDeDatos().enApp;
+  if (r.url && !enApp) {
     contenedor.append(crear("a", {
       className: "btn btn-secondary btn-sm",
       text: "Ver / editar",
@@ -1773,7 +2236,7 @@ function celdaAcciones(r) {
   }));
   const meta = [];
   if (r.numero) meta.push(`#${r.numero}`);
-  if (r.comentarios) meta.push(plural(r.comentarios, "comentario", "comentarios"));
+  if (r.comentarios) meta.push(enApp ? plural(r.comentarios, "actualización", "actualizaciones") : plural(r.comentarios, "comentario", "comentarios"));
   if (meta.length) contenedor.append(crear("span", { className: "meta", text: meta.join(" · ") }));
   return crear("td", { className: "col-accion", attrs: { "data-label": "Acción" } }, [contenedor]);
 }
@@ -2142,9 +2605,12 @@ function cerrarDialogo(dialogo) {
   else dialogo.removeAttribute("open");
 }
 
-/** Detalle de un reporte (se usa en modo demo, donde no hay Issue en GitHub). */
+/** Ventana de detalle: datos del reporte, seguimiento y acciones (corregir, seguimiento, cerrar). */
 function abrirDetalle(r) {
-  const cuerpo = $("#detail-body");
+  state.detalle = r;
+  const fuente = fuenteDeDatos();
+  $("#detail-title").textContent = r.numero ? `Registro #${r.numero}` : "Detalle del reporte";
+
   const lista = crear("dl", { className: "detail-list" });
   const filas = [
     ["Fecha", r.fechaTexto],
@@ -2152,19 +2618,139 @@ function abrirDetalle(r) {
     ["Quién reporta", r.persona],
     ["Email", r.email || "No registrado"],
     ["Activo / BL", r.activo],
-    ["Instancia", r.instancias.join("; ")],
-    ["Estado", r.estado === "cerrado" ? "Cerrado" : "Abierto"]
+    ["Instancia", r.instancias.join("; ")]
   ];
   for (const [etiqueta, valor] of filas) {
     lista.append(crear("dt", { text: etiqueta }), crear("dd", { text: valor || "—" }));
   }
-  cuerpo.replaceChildren(
-    crear("p", { className: "alert alert-info", text: "Modo demostración: este registro no existe en GitHub. Con el repositorio real, «Ver / editar» abre el registro original en GitHub para corregirlo, ampliarlo, comentarlo o consultar su historial." }),
+
+  const partes = [];
+  if (DEMO_MODE) {
+    partes.push(crear("p", { className: "alert alert-info", text: "Modo demostración: los cambios se guardan solo en esta sesión del navegador y no se envían a GitHub." }));
+  }
+  partes.push(
+    crear("div", { className: "detail-status" }, [
+      crear("span", { className: `badge ${r.estado === "cerrado" ? "badge-closed" : "badge-open"}`, text: r.estado === "cerrado" ? "Cerrado" : "Abierto" }),
+      crear("span", { className: "muted", text: r.titulo })
+    ]),
     lista,
     crear("p", { className: "field-label", text: "Tema y descripción" }),
-    crear("div", { className: "tema-text", text: r.tema })
+    crear("div", { className: "tema-text detail-tema", text: r.tema })
   );
+
+  if (fuente.enApp) {
+    const seguimiento = crear("ul", { className: "followup-list", attrs: { id: "followup-list" } }, [
+      crear("li", { className: "followup-empty" }, [crear("span", { className: "spinner", attrs: { "aria-hidden": "true" } }), "Cargando seguimiento…"])
+    ]);
+    partes.push(crear("section", { className: "detail-section" }, [crear("h3", { text: "Seguimiento" }), seguimiento]));
+
+    const selectQuien = crear("select", { className: "input", attrs: { id: "detail-quien" } });
+    llenarSelect(selectQuien, nombresPersonas(), "Seleccione su nombre");
+    selectQuien.value = state.ultimoQuien || "";
+    const texto = crear("textarea", {
+      className: "input textarea textarea-sm",
+      attrs: { id: "detail-texto", rows: "3", placeholder: "Escriba el avance, la decisión o la nueva información sobre este tema…" }
+    });
+    const botones = crear("div", { className: "detail-buttons" }, [
+      crear("button", { className: "btn btn-primary", text: "Agregar seguimiento", attrs: { type: "button", "data-action": "add-followup" } }),
+      crear("button", { className: "btn btn-secondary", text: "Corregir el reporte", attrs: { type: "button", "data-action": "edit-report" } }),
+      crear("button", {
+        className: "btn btn-secondary",
+        text: r.estado === "cerrado" ? "Reabrir tema" : "Marcar como resuelto",
+        attrs: { type: "button", "data-action": "toggle-state" }
+      })
+    ]);
+    partes.push(crear("section", { className: "detail-section" }, [
+      crear("h3", { text: "Actualizar este tema" }),
+      crear("div", { className: "detail-actions-grid" }, [
+        crear("label", { className: "field-label", text: "Quién realiza la acción", attrs: { for: "detail-quien" } }),
+        selectQuien,
+        crear("label", { className: "field-label", text: "Nuevo seguimiento", attrs: { for: "detail-texto" } }),
+        texto,
+        botones,
+        crear("p", { className: "field-hint", attrs: { id: "detail-msg", "aria-live": "polite" } })
+      ])
+    ]));
+    if (r.url) {
+      partes.push(crear("p", { className: "detail-admin" }, [
+        "Administradores del repositorio: ",
+        crear("a", { text: "abrir en GitHub", attrs: { href: r.url, target: "_blank", rel: "noopener noreferrer" } })
+      ]));
+    }
+  } else if (r.url) {
+    partes.push(crear("p", {}, [crear("a", { className: "btn btn-secondary", text: "Abrir en GitHub para editar", attrs: { href: r.url, target: "_blank", rel: "noopener noreferrer" } })]));
+  }
+
+  $("#detail-body").replaceChildren(...partes);
   abrirDialogo("#detail-dialog");
+  if (fuente.enApp) cargarSeguimiento(r);
+}
+
+async function cargarSeguimiento(r) {
+  const lista = $("#followup-list");
+  try {
+    const comentarios = await fuenteDeDatos().comentarios(r);
+    if (state.detalle !== r || !lista.isConnected) return;
+    if (!comentarios.length) {
+      lista.replaceChildren(crear("li", { className: "followup-empty", text: "Aún no hay seguimiento para este tema." }));
+      return;
+    }
+    lista.replaceChildren(...comentarios.map((c) => crear("li", { className: `followup-item${c.evento ? " is-event" : ""}` }, [
+      crear("p", { className: "followup-head" }, [crear("strong", { text: c.titulo }), ` · ${c.persona} · ${c.fecha}`]),
+      c.texto && !c.evento ? crear("div", { className: "tema-text", text: c.texto }) : null
+    ])));
+  } catch (error) {
+    if (lista.isConnected) {
+      lista.replaceChildren(crear("li", { className: "followup-empty", text: `⚠ ${error.mensajeUsuario || "No fue posible cargar el seguimiento."}` }));
+    }
+  }
+}
+
+/** Botones de la ventana de detalle. */
+async function accionDetalle(tipo) {
+  const r = state.detalle;
+  if (!r) return;
+  if (tipo === "edit-report") {
+    iniciarCorreccion(r);
+    return;
+  }
+
+  const mensaje = $("#detail-msg");
+  const quien = $("#detail-quien").value;
+  if (!quien) {
+    mensaje.textContent = "⚠ Seleccione quién realiza la acción.";
+    $("#detail-quien").focus();
+    return;
+  }
+  const texto = $("#detail-texto").value.trim();
+  if (tipo === "add-followup" && !texto) {
+    mensaje.textContent = "⚠ Escriba el seguimiento.";
+    $("#detail-texto").focus();
+    return;
+  }
+  state.ultimoQuien = quien;
+
+  const botones = $$("#detail-body .detail-buttons button");
+  botones.forEach((b) => { b.disabled = true; });
+  const fuente = fuenteDeDatos();
+  try {
+    if (tipo === "add-followup") {
+      mensaje.textContent = "Guardando seguimiento…";
+      await fuente.comentar(r, quien, texto);
+      mostrarMensaje("✓ Seguimiento agregado.", "success");
+    } else if (tipo === "toggle-state") {
+      const nuevo = r.estado === "cerrado" ? "abierto" : "cerrado";
+      mensaje.textContent = nuevo === "cerrado" ? "Marcando como resuelto…" : "Reabriendo el tema…";
+      await fuente.cambiarEstado(r, nuevo, quien);
+      mostrarMensaje(nuevo === "cerrado" ? "✓ Tema marcado como resuelto." : "✓ Tema reabierto.", "success");
+    }
+    await cargarReportes({ forzar: true, silencioso: true });
+    const actualizado = state.reportes.find((x) => (r.numero && x.numero === r.numero) || x.id === r.id);
+    if ($("#detail-dialog").open) abrirDetalle(actualizado || r);
+  } catch (error) {
+    mensaje.textContent = `⚠ ${error.mensajeUsuario || "No fue posible guardar el cambio."}`;
+    botones.forEach((b) => { b.disabled = false; });
+  }
 }
 
 function abrirDialogoCopiar(cuerpo, url, titulo) {
@@ -2258,28 +2844,75 @@ function atenderAcciones(evento) {
     case "open-long":
       abrirLargoEnGitHub();
       break;
+    case "add-followup":
+    case "toggle-state":
+    case "edit-report":
+      accionDetalle(boton.dataset.action);
+      break;
+    case "cancel-edit":
+      nuevoReporte();
+      window.location.hash = "#consultar";
+      break;
+    case "cancel-code":
+      cerrarDialogo($("#code-dialog"));
+      break;
+    case "logout":
+      olvidarCodigo();
+      borrarCache();
+      window.location.hash = "#inicio";
+      window.location.reload();
+      break;
     default:
       break;
   }
 }
 
-function iniciar() {
-  const configurado = configuracionCompleta();
+/** Textos que cambian según la fuente de datos (puente, GitHub directo o demo). */
+function ajustarTextosSegunFuente() {
+  const fuente = fuenteDeDatos();
+  const configurada = fuente.configurada();
 
   $("#demo-badge").hidden = !DEMO_MODE;
-  $("#config-alert").hidden = DEMO_MODE || configurado;
-  if (!DEMO_MODE && configurado) {
+  $("#config-alert").hidden = configurada;
+  $("#config-alert-text").textContent = ` ${textoConfiguracionPendiente()}`;
+
+  if (fuente === FUENTES.github && configurada) {
     const enlace = $("#github-link");
     enlace.href = `${urlRepositorio()}/issues`;
     enlace.hidden = false;
   }
-  $("#form-note").textContent = DEMO_MODE
-    ? "Modo demostración: el tema se guarda solo en esta sesión y no se envía a GitHub."
-    : "Al presionar Registrar tema se abrirá GitHub con el reporte listo: solo debe presionar Create (requiere una cuenta gratuita de GitHub con sesión iniciada).";
+  actualizarBotonSalir();
 
+  if (DEMO_MODE) {
+    $("#form-note").textContent = "Modo demostración: el tema se guarda solo en esta sesión y no se envía a GitHub.";
+  } else if (fuente.enApp) {
+    $("#form-note").textContent = "Se guarda con el código del equipo; no necesita cuenta de GitHub.";
+  } else {
+    $("#form-note").textContent = "Al presionar Registrar tema se abrirá GitHub con el reporte listo: solo debe presionar Create (requiere una cuenta gratuita de GitHub con sesión iniciada).";
+    $("#step2-title").textContent = "Confirme en GitHub";
+    textoConNegrita($("#step2-text"), ["Se abre el reporte listo; solo presione ", { b: "Create" }, "."]);
+  }
+
+  const modoAyuda = fuente.enApp ? "app" : "github";
+  for (const bloque of $$("[data-help-mode]")) bloque.hidden = bloque.dataset.helpMode !== modoAyuda;
+
+  const ayuda = crear("button", { className: "btn-link", text: "¿Cómo editar un registro?", attrs: { type: "button", "data-action": "help-edit" } });
+  $("#edit-help").replaceChildren(
+    fuente.enApp
+      ? "Para corregir, dar seguimiento o cerrar un tema presione "
+      : "Para corregir, ampliar o comentar un tema presione ",
+    crear("strong", { text: "Ver / editar" }),
+    fuente.enApp ? ". No necesita cuenta de GitHub. " : ": se abre el registro original en GitHub. ",
+    ayuda
+  );
+}
+
+function iniciar() {
+  ajustarTextosSegunFuente();
   iniciarFormulario();
   iniciarFiltros();
   iniciarOrdenTabla();
+  iniciarDialogoCodigo();
   document.addEventListener("click", atenderAcciones);
   window.addEventListener("hashchange", () => mostrarVista(vistaDesdeHash()));
 
