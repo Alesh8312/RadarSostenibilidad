@@ -47,8 +47,8 @@
 const DEMO_MODE = false;
 
 const CONFIG = {
-  owner: "CAMBIAR_AQUI",          // Usuario u organización dueña del repositorio. Ej.: "JBOGLOP"
-  repo: "CAMBIAR_AQUI",           // Nombre del repositorio. Ej.: "radar-sostenibilidad"
+  owner: "Alesh8312",          // Usuario u organización dueña del repositorio. Ej.: "JBOGLOP"
+  repo: "RadarSostenibilidad",           // Nombre del repositorio. Ej.: "radar-sostenibilidad"
   label: "radar-sostenibilidad",  // Etiqueta de los reportes del Radar
   titlePrefix: "[RADAR]",         // Inicio del título de cada reporte
 
