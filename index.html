@@ -6,10 +6,10 @@
   <!--
     Política de seguridad del contenido (CSP):
     solo permite scripts propios y de las dos librerías (Chart.js y SheetJS),
-    y solo permite conexiones a la API de GitHub. Protege contra código malicioso
-    que alguien intente insertar en el texto de un reporte.
+    y solo permite conexiones a GitHub y al puente de Google Apps Script.
+    Protege contra código malicioso que alguien intente insertar en un reporte.
   -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://cdn.sheetjs.com; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://cdn.sheetjs.com; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.github.com https://script.google.com https://script.googleusercontent.com; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="robots" content="noindex, nofollow">
   <meta name="description" content="Radar Semanal de Sostenibilidad: registro, consulta y análisis de temas de la Subgerencia de Sostenibilidad.">
   <title>Radar Semanal de Sostenibilidad</title>
@@ -38,6 +38,7 @@
       <div class="header-meta">
         <span id="demo-badge" class="badge badge-demo" hidden>Modo demostración</span>
         <a id="github-link" class="header-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Ver en GitHub</a>
+        <button id="logout-btn" class="header-link header-button" type="button" data-action="logout" hidden>Salir</button>
       </div>
     </div>
 
@@ -56,9 +57,8 @@
 
     <!-- Aviso de configuración pendiente (lo muestra app.js si falta owner/repo) -->
     <div id="config-alert" class="alert alert-warning no-print" role="alert" hidden>
-      <strong>⚠ La aplicación aún no está conectada a un repositorio.</strong>
-      Abra <code>app.js</code> y cambie <code>owner</code> y <code>repo</code> (README, paso 3),
-      o active <code>DEMO_MODE = true</code> para probarla con datos ficticios.
+      <strong>⚠ La aplicación aún no está conectada.</strong>
+      <span id="config-alert-text">Abra <code>app.js</code> y complete la configuración (README), o active <code>DEMO_MODE = true</code> para probarla con datos ficticios.</span>
     </div>
 
     <!-- ===================== VISTA: INICIO ===================== -->
@@ -93,8 +93,8 @@
         <li class="step card">
           <span class="step-num">2</span>
           <div>
-            <p class="step-title">Confirme en GitHub</p>
-            <p class="step-text">Se abre el reporte listo; solo presione <strong>Create</strong>.</p>
+            <p class="step-title" id="step2-title">Guárdelo</p>
+            <p class="step-text" id="step2-text">Se guarda con el código del equipo; no necesita cuenta.</p>
           </div>
         </li>
         <li class="step card">
@@ -117,7 +117,15 @@
             <p class="muted">Todos los campos son obligatorios <span class="req" aria-hidden="true">*</span></p>
           </div>
 
+          <div id="edit-note" class="alert alert-info" hidden></div>
           <div id="form-alert" class="alert alert-warning" role="alert" hidden></div>
+
+          <!-- Quién realiza la corrección (solo al corregir un registro) -->
+          <div class="field" data-field="corrector" hidden>
+            <label class="field-label" for="f-corrector">Quién realiza la corrección <span class="req" aria-hidden="true">*</span></label>
+            <select class="input" id="f-corrector" name="corrector" aria-describedby="err-corrector"></select>
+            <p class="field-error" id="err-corrector"></p>
+          </div>
 
           <!-- Fecha -->
           <div class="field" data-field="fecha">
@@ -182,6 +190,7 @@
           </div>
 
           <div class="form-actions">
+            <button class="btn btn-secondary btn-lg" type="button" data-action="cancel-edit" id="btn-cancel-edit" hidden>Cancelar</button>
             <button class="btn btn-primary btn-xl" type="submit" id="btn-submit">Registrar tema</button>
           </div>
           <p class="form-note" id="form-note"></p>
@@ -311,10 +320,7 @@
         </div>
       </div>
 
-      <p class="edit-help no-print">
-        Para corregir, ampliar o comentar un tema presione <strong>Ver / editar</strong>: se abre el registro original en GitHub.
-        <button class="btn-link" type="button" data-action="help-edit">¿Cómo editar un registro?</button>
-      </p>
+      <p class="edit-help no-print" id="edit-help"></p>
     </section>
 
     <!-- ===================== VISTA: RADAR DE GESTIÓN (DASHBOARD) ===================== -->
@@ -423,8 +429,8 @@
   <!-- ===================== MENSAJES EMERGENTES ===================== -->
   <div id="toast-container" class="toast-container no-print" aria-live="polite" aria-atomic="false"></div>
 
-  <!-- ===================== DIÁLOGO: detalle (modo demo) ===================== -->
-  <dialog id="detail-dialog" class="dialog" aria-labelledby="detail-title">
+  <!-- ===================== DIÁLOGO: detalle, seguimiento y acciones ===================== -->
+  <dialog id="detail-dialog" class="dialog dialog-wide" aria-labelledby="detail-title">
     <div class="dialog-head">
       <h2 id="detail-title">Detalle del reporte</h2>
       <button class="dialog-close" type="button" data-action="close-dialog" aria-label="Cerrar">×</button>
@@ -433,6 +439,29 @@
     <div class="dialog-actions">
       <button class="btn btn-secondary" type="button" data-action="close-dialog">Cerrar</button>
     </div>
+  </dialog>
+
+  <!-- ===================== DIÁLOGO: código del equipo ===================== -->
+  <dialog id="code-dialog" class="dialog" aria-labelledby="code-title">
+    <form id="code-form" novalidate>
+      <div class="dialog-head">
+        <h2 id="code-title">Acceso al Radar</h2>
+      </div>
+      <div class="dialog-body">
+        <p>Ingrese el <strong>código del equipo</strong>. Si no lo tiene, pídalo a la persona que administra el Radar.</p>
+        <label class="field-label" for="code-input">Código del equipo</label>
+        <input class="input" type="password" id="code-input" autocomplete="off" spellcheck="false" required>
+        <label class="choice choice-inline" for="code-remember">
+          <input type="checkbox" id="code-remember" checked>
+          <span>Recordar en este dispositivo (no lo marque en computadores compartidos)</span>
+        </label>
+        <p class="field-error" id="code-error" aria-live="polite"></p>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn btn-secondary" type="button" data-action="cancel-code">Ahora no</button>
+        <button class="btn btn-primary" type="submit">Ingresar</button>
+      </div>
+    </form>
   </dialog>
 
   <!-- ===================== DIÁLOGO: texto extenso (copiar y pegar) ===================== -->
@@ -465,15 +494,26 @@
       <button class="dialog-close" type="button" data-action="close-dialog" aria-label="Cerrar">×</button>
     </div>
     <div class="dialog-body">
-      <ol class="help-steps">
-        <li>En <strong>Consultar reportes</strong>, presione <strong>Ver / editar</strong> en el tema.</li>
-        <li>Inicie sesión en GitHub si se lo solicita.</li>
-        <li><strong>Corregir o actualizar:</strong> en la descripción, presione <strong>···</strong> (arriba a la derecha) → <strong>Edit</strong>. Cambie solo el texto debajo de cada título (no borre los títulos que empiezan con <code>##</code> ni la línea final oculta). Presione <strong>Save</strong>.</li>
-        <li><strong>Ampliar o dar seguimiento:</strong> escriba un comentario al final y presione <strong>Comment</strong>.</li>
-        <li><strong>Historial:</strong> presione la palabra <strong>edited</strong> junto a la descripción.</li>
-        <li><strong>Tema resuelto:</strong> presione <strong>Close issue</strong> (quedará como “Cerrado”).</li>
-      </ol>
-      <p class="muted">Permisos: quien creó el registro siempre puede editarlo. Para editar registros de otras personas se debe ser colaborador del repositorio.</p>
+      <div data-help-mode="app">
+        <ol class="help-steps">
+          <li>En <strong>Consultar reportes</strong>, presione <strong>Ver / editar</strong> en el tema.</li>
+          <li><strong>Corregir:</strong> presione <strong>Corregir el reporte</strong>, cambie lo necesario, indique quién hace la corrección y presione <strong>Guardar cambios</strong>.</li>
+          <li><strong>Ampliar o dar seguimiento:</strong> elija su nombre, escriba el avance y presione <strong>Agregar seguimiento</strong>.</li>
+          <li><strong>Tema resuelto:</strong> presione <strong>Marcar como resuelto</strong> (quedará como “Cerrado”). Se puede reabrir.</li>
+        </ol>
+        <p class="muted">No necesita cuenta de GitHub. Cada cambio queda registrado con el nombre de quien lo hizo y la fecha.</p>
+      </div>
+      <div data-help-mode="github">
+        <ol class="help-steps">
+          <li>En <strong>Consultar reportes</strong>, presione <strong>Ver / editar</strong> en el tema.</li>
+          <li>Inicie sesión en GitHub si se lo solicita.</li>
+          <li><strong>Corregir o actualizar:</strong> en la descripción, presione <strong>···</strong> (arriba a la derecha) → <strong>Edit</strong>. Cambie solo el texto debajo de cada título (no borre los títulos que empiezan con <code>##</code> ni la línea final oculta). Presione <strong>Save</strong>.</li>
+          <li><strong>Ampliar o dar seguimiento:</strong> escriba un comentario al final y presione <strong>Comment</strong>.</li>
+          <li><strong>Historial:</strong> presione la palabra <strong>edited</strong> junto a la descripción.</li>
+          <li><strong>Tema resuelto:</strong> presione <strong>Close issue</strong> (quedará como “Cerrado”).</li>
+        </ol>
+        <p class="muted">Permisos: quien creó el registro siempre puede editarlo. Para editar registros de otras personas se debe ser colaborador del repositorio.</p>
+      </div>
     </div>
     <div class="dialog-actions">
       <button class="btn btn-primary" type="button" data-action="close-dialog">Entendido</button>
